@@ -6,7 +6,7 @@ import * as jose from 'jose';
 import { userService } from '../core/user-service.js';
 import { sessionService } from '../core/session-service.js';
 import { buildPrompt, buildQuotaExceededMessage } from '../core/prompt-builder.js';
-import { createStream } from '../ai/claude-client.js';
+import { createStream } from '../ai/deepseek-client.js';
 import { StreamHandler } from '../ai/stream-handler.js';
 import { estimateTokens } from '../ai/context-manager.js';
 import { conversationRepo } from '../data/repositories/conversation.js';
@@ -112,7 +112,7 @@ wechatMiniappRoute.post('/api/miniapp/chat', jwtAuth, async (c) => {
     newMessage: message,
   });
 
-  const stream = createStream({
+  const stream = await createStream({
     system: promptResult.system,
     messages: promptResult.messages as Array<{ role: 'user' | 'assistant'; content: string }>,
   });

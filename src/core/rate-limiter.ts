@@ -3,7 +3,7 @@ import { redis } from '../data/redis.js';
 export class RateLimiter {
   async acquireUserLock(userId: string): Promise<boolean> {
     const key = `lock:user:${userId}`;
-    const acquired = await redis.set(key, '1', 'EX', 120, 'NX');
+    const acquired = await redis.set(key, '1', 'EX', '120', 'NX');
     return acquired === 'OK';
   }
 
@@ -13,7 +13,7 @@ export class RateLimiter {
 
   async acquireGlobalLock(): Promise<boolean> {
     const key = 'lock:global';
-    const acquired = await redis.set(key, '1', 'EX', 10, 'NX');
+    const acquired = await redis.set(key, '1', 'EX', '10', 'NX');
     return acquired === 'OK';
   }
 

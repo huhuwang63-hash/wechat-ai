@@ -17,7 +17,7 @@ export const conversations = pgTable('conversations', {
   id: uuid('id').primaryKey().defaultRandom(),
   userId: uuid('user_id').references(() => users.id, { onDelete: 'cascade' }).notNull(),
   title: text('title'),
-  model: text('model').default('claude-sonnet-4-6').notNull(),
+  model: text('model').default('deepseek-chat').notNull(),
   systemPrompt: text('system_prompt'),
   totalTokens: integer('total_tokens').default(0).notNull(),
   createdAt: timestamp('created_at').defaultNow().notNull(),

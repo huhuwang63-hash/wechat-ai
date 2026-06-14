@@ -1,9 +1,10 @@
+import type { Stream } from 'openai/streaming';
+
 const FLUSH_INTERVAL_MS = 150;
 const MIN_TOKENS_BEFORE_FLUSH = 4;
 
-type RawStreamEvent = {
-  type: string;
-  delta?: { type: string; text?: string };
+type OpenAIChunk = {
+  choices: Array<{ delta?: { content?: string } }>;
 };
 
 export class StreamHandler {
@@ -13,13 +14,13 @@ export class StreamHandler {
   private lastFlush = Date.now();
 
   async process(
-    stream: AsyncIterable<RawStreamEvent>,
+    stream: Stream<OpenAIChunk>,
     onFlush: (text: string) => Promise<void>,
     onDone: (fullText: string) => Promise<void>,
   ): Promise<void> {
-    for await (const event of stream) {
-      if (event.type === 'content_block_delta' && event.delta?.type === 'text_delta') {
-        const text = event.delta.text ?? '';
+    for await (const chunk of stream) {
+      const text = chunk.choices[0]?.delta?.content;
+      if (text) {
         this.buffer += text;
         this.accumulatedText += text;
         this.tokenCount++;

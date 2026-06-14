@@ -31,13 +31,13 @@ export function slidingWindow(messages: ContextMessage[], maxTokens: number = MA
 
 export async function generateSummary(messages: ContextMessage[]): Promise<string> {
   // Lazy import to avoid triggering loadConfig() at module-load time
-  const { callClaude } = await import('./claude-client.js');
+  const { callDeepSeek } = await import('./deepseek-client.js');
 
   const conversationText = messages
     .map(m => `${m.role}: ${m.content}`)
     .join('\n');
 
-  const result = await callClaude({
+  const result = await callDeepSeek({
     system: '你是一个对话摘要工具。请用简洁的一段话（不超过 200 字）总结以下对话的要点。',
     messages: [{ role: 'user', content: `请总结这段对话：\n${conversationText}` }],
     maxTokens: 300,

@@ -1,14 +1,14 @@
 import { describe, it, expect } from 'vitest';
 import { StreamHandler } from '../../src/ai/stream-handler.js';
 
-function createMockStream(events: Array<{ type: string; delta?: { type: string; text?: string } }>) {
+function createMockStream(chunks: Array<{ choices: Array<{ delta?: { content?: string } }> }>) {
   return {
     async *[Symbol.asyncIterator]() {
-      for (const event of events) {
-        yield event;
+      for (const chunk of chunks) {
+        yield chunk;
       }
     },
-  };
+  } as any;
 }
 
 describe('StreamHandler', () => {
@@ -17,13 +17,13 @@ describe('StreamHandler', () => {
     const flushed: string[] = [];
     let doneText = '';
 
-    const events = [
-      { type: 'content_block_delta', delta: { type: 'text_delta', text: '你好' } },
-      { type: 'content_block_delta', delta: { type: 'text_delta', text: '世界' } },
+    const chunks = [
+      { choices: [{ delta: { content: '你好' } }] },
+      { choices: [{ delta: { content: '世界' } }] },
     ];
 
     await handler.process(
-      createMockStream(events),
+      createMockStream(chunks),
       async (text) => { flushed.push(text); },
       async (fullText) => { doneText = fullText; },
     );
@@ -37,16 +37,16 @@ describe('StreamHandler', () => {
     const flushed: string[] = [];
     let doneText = '';
 
-    const events = [
-      { type: 'content_block_delta', delta: { type: 'text_delta', text: 'A' } },
-      { type: 'content_block_delta', delta: { type: 'text_delta', text: 'B' } },
-      { type: 'content_block_delta', delta: { type: 'text_delta', text: 'C' } },
-      { type: 'content_block_delta', delta: { type: 'text_delta', text: 'D' } },
-      { type: 'content_block_delta', delta: { type: 'text_delta', text: 'E' } },
+    const chunks = [
+      { choices: [{ delta: { content: 'A' } }] },
+      { choices: [{ delta: { content: 'B' } }] },
+      { choices: [{ delta: { content: 'C' } }] },
+      { choices: [{ delta: { content: 'D' } }] },
+      { choices: [{ delta: { content: 'E' } }] },
     ];
 
     await handler.process(
-      createMockStream(events),
+      createMockStream(chunks),
       async (text) => { flushed.push(text); },
       async (fullText) => { doneText = fullText; },
     );
@@ -55,18 +55,18 @@ describe('StreamHandler', () => {
     expect(flushed.length).toBeGreaterThan(0);
   });
 
-  it('non-text-delta events are ignored', async () => {
+  it('chunks without content are ignored', async () => {
     const handler = new StreamHandler();
     let doneText = '';
 
-    const events = [
-      { type: 'content_block_start' },
-      { type: 'content_block_delta', delta: { type: 'text_delta', text: 'Hi' } },
-      { type: 'content_block_stop' },
+    const chunks = [
+      { choices: [{ delta: {} }] },
+      { choices: [{ delta: { content: 'Hi' } }] },
+      { choices: [] },
     ];
 
     await handler.process(
-      createMockStream(events),
+      createMockStream(chunks),
       async () => {},
       async (fullText) => { doneText = fullText; },
     );

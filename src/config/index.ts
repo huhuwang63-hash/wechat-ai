@@ -6,7 +6,7 @@ try { process.loadEnvFile?.(); } catch { /* ignore */ }
 const envSchema = z.object({
   DATABASE_URL: z.string().url(),
   REDIS_URL: z.string().url(),
-  CLAUDE_API_KEY: z.string().min(1),
+  DEEPSEEK_API_KEY: z.string().min(1),
   WECHAT_MP_APPID: z.string().min(1),
   WECHAT_MP_SECRET: z.string().min(1),
   WECHAT_MP_TOKEN: z.string().min(1),

@@ -6,12 +6,10 @@ import { parseWechatMessage, routeMessage } from '../core/message-router.js';
 import { userService } from '../core/user-service.js';
 import { sessionService } from '../core/session-service.js';
 import { rateLimiter } from '../core/rate-limiter.js';
-import { buildWelcomeMessage, buildQuotaExceededMessage, buildErrorMessage } from '../core/prompt-builder.js';
-import { buildPrompt } from '../core/prompt-builder.js';
-import { createStream } from '../ai/claude-client.js';
+import { buildPrompt, buildWelcomeMessage, buildQuotaExceededMessage, buildErrorMessage } from '../core/prompt-builder.js';
+import { createStream } from '../ai/deepseek-client.js';
 import { StreamHandler } from '../ai/stream-handler.js';
 import { estimateTokens } from '../ai/context-manager.js';
-import { conversationRepo } from '../data/repositories/conversation.js';
 import { redis } from '../data/redis.js';
 
 const config = loadConfig();
@@ -19,7 +17,7 @@ const wechatConfig = createWechatConfig(config);
 
 export const wechatMpRoute = new Hono();
 
-// GET: WeChat server verification
+// ===== GET: WeChat server verification =====
 wechatMpRoute.get('/api/wechat/mp', async (c) => {
   const { signature, timestamp, nonce, echostr } = c.req.query();
   const token = wechatConfig.mp.token;
@@ -33,7 +31,7 @@ wechatMpRoute.get('/api/wechat/mp', async (c) => {
   return c.text('signature error', 403);
 });
 
-// POST: Receive messages
+// ===== POST: Receive messages =====
 wechatMpRoute.post('/api/wechat/mp', async (c) => {
   const body = await c.req.text();
   const parsed = parseXml(body);
@@ -44,11 +42,15 @@ wechatMpRoute.post('/api/wechat/mp', async (c) => {
     return c.text('success');
   }
 
-  // Return empty immediately to prevent WeChat 5s retry
-  c.executionCtx.waitUntil(handleMpMessage(route.parsed));
-  return c.text('');
+  // Fire-and-forget: return immediately to avoid WeChat 5s timeout,
+  // then process AI reply asynchronously
+  handleMpMessage(route.parsed).catch(err => {
+    console.log('[ERROR] handleMpMessage 异常:', err?.message || err);
+  });
+  return c.text('success');
 });
 
+// ===== Core: process a WeChat message and reply via AI =====
 async function handleMpMessage(parsed: { fromUser: string; content: string; type: string }): Promise<void> {
   const openid = parsed.fromUser;
 
@@ -56,80 +58,99 @@ async function handleMpMessage(parsed: { fromUser: string; content: string; type
   if (!locked) return;
 
   try {
+    // 1. Get or create user
     const userId = await userService.getOrCreateMpUser(openid);
 
-    // Check quota before processing (consumption happens after AI reply)
+    // 2. Check quota
     const quotaCheck = await userService.checkQuota(userId);
     if (!quotaCheck.allowed) {
       await sendCustomMessage(openid, buildQuotaExceededMessage());
       return;
     }
 
-    // Handle special commands
+    // 3. Handle special commands
     if (parsed.content.trim() === '新对话' || parsed.content.trim() === '/new') {
       await sessionService.startNewSession(openid, userId);
       await sendCustomMessage(openid, '✅ 已开启新对话');
       return;
     }
 
-    const session = await sessionService.getOrCreateSession(openid, userId);
-
-    // Handle subscribe event
+    // 4. Handle subscribe event
     if (parsed.type === 'event' && parsed.content === 'subscribe') {
       await sendCustomMessage(openid, buildWelcomeMessage());
       return;
     }
 
-    // Save user message
+    // 5. Get or create session
+    const session = await sessionService.getOrCreateSession(openid, userId);
+
+    // 6. Save user message
     const userTokens = estimateTokens(parsed.content);
     await sessionService.addMessage(openid, session, 'user', parsed.content, userTokens);
 
-    // Build prompt
+    // 7. Build prompt with sliding window context management
     const promptResult = buildPrompt({
       history: session.messages,
       newMessage: parsed.content,
     });
 
-    // Call Claude streaming API
-    const stream = createStream({
+    // 8. Call DeepSeek streaming API
+    const stream = await createStream({
       system: promptResult.system,
       messages: promptResult.messages as Array<{ role: 'user' | 'assistant'; content: string }>,
     });
 
+    // 9. Stream AI reply to user via WeChat custom message API
+    console.log(`[AI] 开始处理: ${parsed.content.substring(0, 30)}`);
     const handler = new StreamHandler();
-    let sent = false;
+    let fullReply = '';
+    let chunkCount = 0;
 
     await handler.process(
       stream as any,
       async (text) => {
+        fullReply += text;
         await sendCustomMessage(openid, text);
-        sent = true;
+        chunkCount++;
+        // Tiny delay to avoid WeChat rate limiting
+        await sleep(100);
       },
-      async (fullText) => {
-        const outputTokens = estimateTokens(fullText);
+      async (completeText) => {
+        fullReply = completeText;
+        const outputTokens = estimateTokens(completeText);
         const totalTokens = userTokens + outputTokens;
 
-        await sessionService.addMessage(openid, session, 'assistant', fullText, outputTokens);
-        await conversationRepo.addTokens(session.conversationId, totalTokens);
+        // Save assistant reply (may fail if DB is down, but we already sent the reply)
+        await sessionService.addMessage(openid, session, 'assistant', completeText, outputTokens);
+        try {
+          const { conversationRepo } = await import('../data/repositories/conversation.js');
+          await conversationRepo.addTokens(session.conversationId, totalTokens);
+        } catch { /* DB not available, skip */ }
         await userService.checkAndConsume(userId, totalTokens);
       },
     );
 
-    if (!sent) {
+    console.log(`[AI] 回复完成: ${chunkCount} chunks, ${fullReply.length} 字`);
+
+    // Edge case: if no chunks were emitted (AI didn't generate text)
+    if (!fullReply) {
+      console.log('[AI] 警告: 未生成任何回复');
       await sendCustomMessage(openid, '（AI 未生成回复，请重试）');
     }
-  } catch (error) {
-    console.error('MP message handling error:', error);
+  } catch (error: any) {
+    console.log('[ERROR] handleMpMessage 错误:', error?.message || error);
+    // Try to send error message, but don't crash if this also fails
     try {
       await sendCustomMessage(openid, buildErrorMessage());
-    } catch (sendError) {
-      console.error('Failed to send error message to user:', sendError);
+    } catch (sendError: any) {
+      console.log('[ERROR] 发送错误提示失败:', sendError?.message || sendError);
     }
   } finally {
     await rateLimiter.releaseUserLock(openid);
   }
 }
 
+// ===== Send custom message to user via WeChat API =====
 async function sendCustomMessage(openid: string, content: string): Promise<void> {
   const accessToken = await getAccessToken();
   const url = `https://api.weixin.qq.com/cgi-bin/message/custom/send?access_token=${accessToken}`;
@@ -150,6 +171,7 @@ async function sendCustomMessage(openid: string, content: string): Promise<void>
   }
 }
 
+// ===== Get WeChat access_token (with in-memory cache) =====
 async function getAccessToken(): Promise<string> {
   const cached = await redis.get('wechat:access_token');
   if (cached) return cached;
@@ -166,6 +188,7 @@ async function getAccessToken(): Promise<string> {
   return data.access_token;
 }
 
+// ===== Parse WeChat XML message body =====
 function parseXml(xml: string): Record<string, string> {
   const result: Record<string, string> = {};
   const regex = /<(\w+)><!\[CDATA\[(.*?)\]\]><\/\1>|<(\w+)>(.*?)<\/\3>/gs;
@@ -176,4 +199,8 @@ function parseXml(xml: string): Record<string, string> {
     result[key] = value;
   }
   return result;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
 }

@@ -1,4 +1,3 @@
-import type { MessageParam } from '@anthropic-ai/sdk/resources/index.js';
 import { slidingWindow, estimateTokens } from '../ai/context-manager.js';
 
 const DEFAULT_SYSTEM_PROMPT = `你是一个有用的 AI 助手，通过微信为用户提供帮助。
@@ -16,7 +15,7 @@ export interface BuildPromptInput {
 
 export interface BuildPromptResult {
   system: string;
-  messages: MessageParam[];
+  messages: Array<{ role: 'user' | 'assistant'; content: string }>;
 }
 
 export function buildPrompt(input: BuildPromptInput): BuildPromptResult {
@@ -32,7 +31,7 @@ export function buildPrompt(input: BuildPromptInput): BuildPromptResult {
   // Apply sliding window to prevent context overflow
   const trimmed = slidingWindow(contextMessages, MAX_CONTEXT_TOKENS);
 
-  const messages: MessageParam[] = [];
+  const messages: Array<{ role: 'user' | 'assistant'; content: string }> = [];
 
   for (const msg of trimmed) {
     if (msg.role === 'user' || msg.role === 'assistant') {
@@ -49,7 +48,7 @@ export function buildPrompt(input: BuildPromptInput): BuildPromptResult {
 }
 
 export function buildWelcomeMessage(): string {
-  return `👋 你好！我是 AI 助手，基于 Claude 驱动。
+  return `👋 你好！我是 AI 助手，基于 DeepSeek 驱动。
 
 你可以：
 • 💬 随意聊天问答

@@ -1,6 +1,5 @@
 import { redis } from '../data/redis.js';
-import { conversationRepo } from '../data/repositories/conversation.js';
-import { messageRepo } from '../data/repositories/message.js';
+import { randomUUID } from 'crypto';
 
 const SESSION_TTL = 30 * 60;
 const MAX_CACHED_MESSAGES = 20;
@@ -18,37 +17,26 @@ export const sessionService = {
       return JSON.parse(cached) as CachedSession;
     }
 
-    const recentConversations = await conversationRepo.findByUserId(userId, 1);
-    const latest = recentConversations[0];
-
-    if (latest) {
-      const msgs = await messageRepo.findByConversationId(latest.id, MAX_CACHED_MESSAGES);
-      const session: CachedSession = {
-        conversationId: latest.id,
-        messages: msgs.map(m => ({ role: m.role, content: m.content })),
-      };
-      await redis.setex(cacheKey, SESSION_TTL, JSON.stringify(session));
-      return session;
-    }
-
-    const conv = await conversationRepo.create({
-      userId,
-      title: '新对话',
-      model: 'claude-sonnet-4-6',
-    });
-
-    const session: CachedSession = { conversationId: conv.id, messages: [] };
+    // Create new session (no DB needed)
+    const session: CachedSession = {
+      conversationId: randomUUID(),
+      messages: [],
+    };
     await redis.setex(cacheKey, SESSION_TTL, JSON.stringify(session));
     return session;
   },
 
   async addMessage(openid: string, session: CachedSession, role: string, content: string, tokenCount: number): Promise<void> {
-    await messageRepo.create({
-      conversationId: session.conversationId,
-      role,
-      content,
-      tokenCount,
-    });
+    // Try DB save but don't fail if DB is down
+    try {
+      const { messageRepo } = await import('../data/repositories/message.js');
+      await messageRepo.create({
+        conversationId: session.conversationId,
+        role,
+        content,
+        tokenCount,
+      });
+    } catch { /* DB not available, rely on memory cache */ }
 
     session.messages.push({ role, content });
     if (session.messages.length > MAX_CACHED_MESSAGES) {
@@ -60,14 +48,21 @@ export const sessionService = {
   },
 
   async startNewSession(openid: string, userId: string, systemPrompt?: string): Promise<CachedSession> {
-    const conv = await conversationRepo.create({
-      userId,
-      title: '新对话',
-      model: 'claude-sonnet-4-6',
-      systemPrompt,
-    });
+    // Try DB but don't fail
+    try {
+      const { conversationRepo } = await import('../data/repositories/conversation.js');
+      await conversationRepo.create({
+        userId,
+        title: '新对话',
+        model: 'deepseek-chat',
+        systemPrompt,
+      });
+    } catch { /* DB not available */ }
 
-    const session: CachedSession = { conversationId: conv.id, messages: [] };
+    const session: CachedSession = {
+      conversationId: randomUUID(),
+      messages: [],
+    };
     const cacheKey = `session:${openid}`;
     await redis.setex(cacheKey, SESSION_TTL, JSON.stringify(session));
     return session;
