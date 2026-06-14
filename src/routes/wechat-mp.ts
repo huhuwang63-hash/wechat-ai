@@ -58,8 +58,9 @@ async function handleMpMessage(parsed: { fromUser: string; content: string; type
   try {
     const userId = await userService.getOrCreateMpUser(openid);
 
-    const quota = await userService.checkQuota(userId);
-    if (!quota.allowed) {
+    // Check quota before processing (consumption happens after AI reply)
+    const quotaCheck = await userService.checkQuota(userId);
+    if (!quotaCheck.allowed) {
       await sendCustomMessage(openid, buildQuotaExceededMessage());
       return;
     }
@@ -110,7 +111,7 @@ async function handleMpMessage(parsed: { fromUser: string; content: string; type
 
         await sessionService.addMessage(openid, session, 'assistant', fullText, outputTokens);
         await conversationRepo.addTokens(session.conversationId, totalTokens);
-        await userService.consumeTokens(userId, totalTokens);
+        await userService.checkAndConsume(userId, totalTokens);
       },
     );
 
@@ -119,7 +120,11 @@ async function handleMpMessage(parsed: { fromUser: string; content: string; type
     }
   } catch (error) {
     console.error('MP message handling error:', error);
-    await sendCustomMessage(openid, buildErrorMessage());
+    try {
+      await sendCustomMessage(openid, buildErrorMessage());
+    } catch (sendError) {
+      console.error('Failed to send error message to user:', sendError);
+    }
   } finally {
     await rateLimiter.releaseUserLock(openid);
   }

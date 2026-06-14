@@ -94,6 +94,10 @@ wechatMiniappRoute.post('/api/miniapp/chat', jwtAuth, async (c) => {
 
   let session;
   if (conversationId) {
+    const conv = await conversationRepo.findById(conversationId);
+    if (!conv || conv.userId !== userId) {
+      return c.json({ error: '会话不存在' }, 404);
+    }
     const msgs = await messageRepo.findByConversationId(conversationId);
     session = { conversationId, messages: msgs.map(m => ({ role: m.role, content: m.content })) };
   } else {
@@ -127,7 +131,7 @@ wechatMiniappRoute.post('/api/miniapp/chat', jwtAuth, async (c) => {
 
         await sessionService.addMessage(openid, session, 'assistant', fullText, outputTokens);
         await conversationRepo.addTokens(session.conversationId, totalTokens);
-        await userService.consumeTokens(userId, totalTokens);
+        await userService.checkAndConsume(userId, totalTokens);
 
         await sse.writeSSE({ data: '[DONE]' });
       },
@@ -145,6 +149,11 @@ wechatMiniappRoute.get('/api/miniapp/conversations', jwtAuth, async (c) => {
 // GET /api/miniapp/conversations/:id
 wechatMiniappRoute.get('/api/miniapp/conversations/:id', jwtAuth, async (c) => {
   const id = c.req.param('id');
+  const userId = (c as any).get('userId') as string;
+  const conv = await conversationRepo.findById(id);
+  if (!conv || conv.userId !== userId) {
+    return c.json({ error: '会话不存在' }, 404);
+  }
   const messages = await messageRepo.findByConversationId(id);
   return c.json({ messages });
 });
@@ -164,6 +173,11 @@ wechatMiniappRoute.post('/api/miniapp/conversations', jwtAuth, async (c) => {
 // DELETE /api/miniapp/conversations/:id
 wechatMiniappRoute.delete('/api/miniapp/conversations/:id', jwtAuth, async (c) => {
   const id = c.req.param('id');
+  const userId = (c as any).get('userId') as string;
+  const conv = await conversationRepo.findById(id);
+  if (!conv || conv.userId !== userId) {
+    return c.json({ error: '会话不存在' }, 404);
+  }
   await conversationRepo.delete(id);
   return c.body(null, 204);
 });

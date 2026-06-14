@@ -1,5 +1,3 @@
-import { callClaude } from './claude-client.js';
-
 const MAX_CONTEXT_TOKENS = 8000;
 const SUMMARY_EVERY_N_ROUNDS = 10;
 
@@ -32,6 +30,9 @@ export function slidingWindow(messages: ContextMessage[], maxTokens: number = MA
 }
 
 export async function generateSummary(messages: ContextMessage[]): Promise<string> {
+  // Lazy import to avoid triggering loadConfig() at module-load time
+  const { callClaude } = await import('./claude-client.js');
+
   const conversationText = messages
     .map(m => `${m.role}: ${m.content}`)
     .join('\n');
