@@ -1,5 +1,8 @@
 import { z } from 'zod';
 
+// Load .env file in development (Node.js 21.7+)
+try { process.loadEnvFile?.(); } catch { /* ignore */ }
+
 const envSchema = z.object({
   DATABASE_URL: z.string().url(),
   REDIS_URL: z.string().url(),
