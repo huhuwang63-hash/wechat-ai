@@ -39,13 +39,13 @@ wechatMpRoute.post('/api/wechat/mp', async (c) => {
   const route = routeMessage(message);
 
   if (!route.shouldReply) {
+    c.executionCtx.waitUntil(Promise.resolve());
     return c.text('success');
   }
 
-  // Fire-and-forget: return immediately to avoid WeChat 5s timeout,
-  // then process AI reply asynchronously
+  // Fire-and-forget: return immediately to avoid WeChat 5s timeout
   handleMpMessage(route.parsed).catch(err => {
-    console.log('[ERROR] handleMpMessage 异常:', err?.message || err);
+    console.error('handleMpMessage error:', err?.message || err);
   });
   return c.text('success');
 });
@@ -58,93 +58,79 @@ async function handleMpMessage(parsed: { fromUser: string; content: string; type
   if (!locked) return;
 
   try {
-    // 1. Get or create user
     const userId = await userService.getOrCreateMpUser(openid);
 
-    // 2. Check quota
     const quotaCheck = await userService.checkQuota(userId);
     if (!quotaCheck.allowed) {
       await sendCustomMessage(openid, buildQuotaExceededMessage());
       return;
     }
 
-    // 3. Handle special commands
     if (parsed.content.trim() === '新对话' || parsed.content.trim() === '/new') {
       await sessionService.startNewSession(openid, userId);
       await sendCustomMessage(openid, '✅ 已开启新对话');
       return;
     }
 
-    // 4. Handle subscribe event
     if (parsed.type === 'event' && parsed.content === 'subscribe') {
       await sendCustomMessage(openid, buildWelcomeMessage());
       return;
     }
 
-    // 5. Get or create session
     const session = await sessionService.getOrCreateSession(openid, userId);
 
-    // 6. Save user message
     const userTokens = estimateTokens(parsed.content);
     await sessionService.addMessage(openid, session, 'user', parsed.content, userTokens);
 
-    // 7. Build prompt with sliding window context management
     const promptResult = buildPrompt({
       history: session.messages,
       newMessage: parsed.content,
     });
 
-    // 8. Call DeepSeek streaming API
     const stream = await createStream({
       system: promptResult.system,
       messages: promptResult.messages as Array<{ role: 'user' | 'assistant'; content: string }>,
     });
 
-    // 9. Stream AI reply to user via WeChat custom message API
-    console.log(`[AI] 开始处理: ${parsed.content.substring(0, 30)}`);
     const handler = new StreamHandler();
-    let fullReply = '';
-    let chunkCount = 0;
+    let batchBuffer = '';
+    let totalSentLen = 0;
 
     await handler.process(
       stream as any,
       async (text) => {
-        fullReply += text;
-        await sendCustomMessage(openid, text);
-        chunkCount++;
-        // Tiny delay to avoid WeChat rate limiting
-        await sleep(100);
+        batchBuffer += text;
+        if (batchBuffer.length >= 30) {
+          await sendCustomMessage(openid, batchBuffer);
+          totalSentLen += batchBuffer.length;
+          batchBuffer = '';
+          await sleep(800);
+        }
       },
       async (completeText) => {
-        fullReply = completeText;
-        const outputTokens = estimateTokens(completeText);
+        if (batchBuffer.length > 0) {
+          await sendCustomMessage(openid, batchBuffer);
+          totalSentLen += batchBuffer.length;
+        }
+        const outputTokens = estimateTokens(completeText || '');
         const totalTokens = userTokens + outputTokens;
-
-        // Save assistant reply (may fail if DB is down, but we already sent the reply)
-        await sessionService.addMessage(openid, session, 'assistant', completeText, outputTokens);
+        await sessionService.addMessage(openid, session, 'assistant', completeText || '', outputTokens);
         try {
           const { conversationRepo } = await import('../data/repositories/conversation.js');
           await conversationRepo.addTokens(session.conversationId, totalTokens);
-        } catch { /* DB not available, skip */ }
+        } catch { /* DB not available */ }
         await userService.checkAndConsume(userId, totalTokens);
       },
     );
 
-    console.log(`[AI] 回复完成: ${chunkCount} chunks, ${fullReply.length} 字`);
-
-    // Edge case: if no chunks were emitted (AI didn't generate text)
-    if (!fullReply) {
-      console.log('[AI] 警告: 未生成任何回复');
+    if (totalSentLen === 0) {
       await sendCustomMessage(openid, '（AI 未生成回复，请重试）');
     }
   } catch (error: any) {
-    console.log('[ERROR] handleMpMessage 错误:', error?.message || error);
-    // Try to send error message, but don't crash if this also fails
+    console.error('handleMpMessage error:', error?.message || error);
     try {
       await sendCustomMessage(openid, buildErrorMessage());
-    } catch (sendError: any) {
-      console.log('[ERROR] 发送错误提示失败:', sendError?.message || sendError);
-    }
+    } catch { /* can't send error either */ }
   } finally {
     await rateLimiter.releaseUserLock(openid);
   }
@@ -158,11 +144,7 @@ async function sendCustomMessage(openid: string, content: string): Promise<void>
   const response = await fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      touser: openid,
-      msgtype: 'text',
-      text: { content },
-    }),
+    body: JSON.stringify({ touser: openid, msgtype: 'text', text: { content } }),
   });
 
   const result = await response.json() as Record<string, unknown>;
@@ -171,7 +153,7 @@ async function sendCustomMessage(openid: string, content: string): Promise<void>
   }
 }
 
-// ===== Get WeChat access_token (with in-memory cache) =====
+// ===== Get WeChat access_token =====
 async function getAccessToken(): Promise<string> {
   const cached = await redis.get('wechat:access_token');
   if (cached) return cached;
@@ -191,12 +173,16 @@ async function getAccessToken(): Promise<string> {
 // ===== Parse WeChat XML message body =====
 function parseXml(xml: string): Record<string, string> {
   const result: Record<string, string> = {};
-  const regex = /<(\w+)><!\[CDATA\[(.*?)\]\]><\/\1>|<(\w+)>(.*?)<\/\3>/gs;
+  const cdataRegex = /<(\w+)><!\[CDATA\[(.*?)\]\]><\/\1>/gs;
   let match: RegExpExecArray | null;
-  while ((match = regex.exec(xml)) !== null) {
-    const key = match[1] || match[3];
-    const value = match[2] || match[4];
-    result[key] = value;
+  while ((match = cdataRegex.exec(xml)) !== null) {
+    result[match[1]] = match[2];
+  }
+  const plainRegex = /<(\w+)>(.*?)<\/\1>/gs;
+  while ((match = plainRegex.exec(xml)) !== null) {
+    if (!(match[1] in result) && match[1] !== 'xml') {
+      result[match[1]] = match[2];
+    }
   }
   return result;
 }
